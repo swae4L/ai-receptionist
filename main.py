@@ -195,6 +195,8 @@ async def twilio_stream(websocket: WebSocket):
                         print(f"CALLER: {text}")
                         await respond(text)
             except Exception as e:
+                import traceback
                 print(f"dg_to_ai error: {e}")
+                traceback.print_exc()
 
         await asyncio.gather(twilio_to_dg(), dg_to_ai())
