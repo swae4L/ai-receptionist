@@ -1,4 +1,4 @@
-import os, json, base64, asyncio
+import os, json, base64, asyncio, re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, WebSocket, Request
@@ -24,7 +24,10 @@ def system_prompt():
         f"The current date and time is {now.strftime('%A, %B %d, %Y, %I:%M %p')}. "
         f"Use this to resolve relative dates like 'Thursday' or 'tomorrow' into actual calendar dates. "
         f"Keep replies short and natural. When a caller wants to book, collect their name, "
-        f"preferred date, and time, then call the book_appointment tool with the date in YYYY-MM-DD format. "
+        f"preferred date, time, and email address. Callers often say emails out loud, like "
+        f"'george dot smith at gmail dot com' — convert that into standard format "
+        f"('george.smith@gmail.com'). Read the email back to confirm you heard it right before booking. "
+        f"Then call the book_appointment tool with the date in YYYY-MM-DD format. "
         f"Confirm the booking back in one sentence."
     )
 
@@ -39,21 +42,45 @@ TOOLS = [{
             "properties": {
                 "name": {"type": "string", "description": "Caller's full name"},
                 "date": {"type": "string", "description": "Date in YYYY-MM-DD format"},
-                "time": {"type": "string", "description": "Time, e.g. '3:00 PM'"}
+                "time": {"type": "string", "description": "Time, e.g. '3:00 PM'"},
+                "email": {"type": "string", "description": "Caller's email in standard format, e.g. 'george.smith@gmail.com'"}
             },
-            "required": ["name", "date", "time"]
+            "required": ["name", "date", "time", "email"]
         }
     }
 }]
 
 
-async def book_appointment(name, date, time):
+def normalize_email(raw):
+    """Turn a spoken email like 'george dot smith at gmail dot com'
+    into 'george.smith@gmail.com'. Safe to run on an already-clean
+    email too — it just lowercases and returns it unchanged."""
+    email = raw.strip().lower()
+    # Replace spoken words with their symbols. \b is a "word boundary",
+    # so \bat\b matches the standalone word "at" but NOT the "at" inside
+    # "nathan". The \s* around it eats any spaces on either side.
+    spoken = {
+        r"\s*\bat\b\s*": "@",
+        r"\s*\bdot\b\s*": ".",
+        r"\s*\bunderscore\b\s*": "_",
+        r"\s*\b(?:dash|hyphen)\b\s*": "-",
+        r"\s*\bplus\b\s*": "+",
+    }
+    for pattern, symbol in spoken.items():
+        email = re.sub(pattern, symbol, email)
+    # Drop any leftover spaces, e.g. "g mail" -> "gmail".
+    return email.replace(" ", "")
+
+
+async def book_appointment(name, date, time, email):
     try:
         dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %I:%M %p")
     except ValueError:
         dt = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M")
     dt = dt.replace(tzinfo=ZoneInfo("America/Toronto"))
     start_iso = dt.isoformat()
+
+    email = normalize_email(email)
 
     url = "https://api.cal.com/v2/bookings"
     headers = {
@@ -66,7 +93,7 @@ async def book_appointment(name, date, time):
         "eventTypeId": int(CALCOM_EVENT_TYPE_ID),
         "attendee": {
             "name": name,
-            "email": "caller@example.com",
+            "email": email,
             "timeZone": "America/Toronto",
         },
     }
