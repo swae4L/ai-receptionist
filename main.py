@@ -170,14 +170,29 @@ async def twilio_stream(websocket: WebSocket):
                 body = {"text": text, "model_id": "eleven_turbo_v2"}
                 async with httpx.AsyncClient() as client:
                     async with client.stream("POST", url, headers=h, json=body) as resp:
+                        # ElevenLabs hands us network-sized chunks, not audio
+                        # frames. We buffer the raw bytes and re-slice them into
+                        # fixed 160-byte frames so each send is exactly 20 ms of
+                        # audio — keeping our send rate matched to real playback
+                        # time. (μ-law @ 8 kHz = 8 bytes/ms, so 20 ms = 160 bytes.)
+                        FRAME = 160
+                        buf = b""
                         async for chunk in resp.aiter_bytes():
                             if interrupt.is_set():
                                 break
-                            if chunk:
+                            buf += chunk
+                            while len(buf) >= FRAME:
+                                frame, buf = buf[:FRAME], buf[FRAME:]
                                 await websocket.send_text(json.dumps({
                                     "event": "media", "streamSid": stream_sid,
-                                    "media": {"payload": base64.b64encode(chunk).decode()}}))
+                                    "media": {"payload": base64.b64encode(frame).decode()}}))
                                 await asyncio.sleep(0.02)
+                        # Flush any trailing bytes (< one full frame) so the tail
+                        # of the speech isn't clipped.
+                        if buf and not interrupt.is_set():
+                            await websocket.send_text(json.dumps({
+                                "event": "media", "streamSid": stream_sid,
+                                "media": {"payload": base64.b64encode(buf).decode()}}))
             except Exception as e:
                 print(f"speak error: {e}")
             finally:
