@@ -173,10 +173,18 @@ async def twilio_stream(websocket: WebSocket):
                         # ElevenLabs hands us network-sized chunks, not audio
                         # frames. We buffer the raw bytes and re-slice them into
                         # fixed 160-byte frames so each send is exactly 20 ms of
-                        # audio — keeping our send rate matched to real playback
-                        # time. (μ-law @ 8 kHz = 8 bytes/ms, so 20 ms = 160 bytes.)
+                        # audio. (μ-law @ 8 kHz = 8 bytes/ms, so 20 ms = 160 bytes.)
                         FRAME = 160
+                        FRAME_SECS = 0.02
                         buf = b""
+                        # Drift-compensated pacing: instead of sleeping a flat
+                        # 20 ms per frame (which adds up the send + encode time on
+                        # top, so we fall behind real time and Twilio underruns),
+                        # we track an absolute deadline for each frame and sleep
+                        # only until then. loop.time() is a steady monotonic clock.
+                        loop = asyncio.get_running_loop()
+                        next_frame_at = loop.time()
+                        max_lag = 0.0  # worst we fell behind, for diagnostics
                         async for chunk in resp.aiter_bytes():
                             if interrupt.is_set():
                                 break
@@ -186,7 +194,28 @@ async def twilio_stream(websocket: WebSocket):
                                 await websocket.send_text(json.dumps({
                                     "event": "media", "streamSid": stream_sid,
                                     "media": {"payload": base64.b64encode(frame).decode()}}))
-                                await asyncio.sleep(0.02)
+                                next_frame_at += FRAME_SECS
+                                delay = next_frame_at - loop.time()
+                                if delay > 0:
+                                    # On schedule (or ahead): wait out the rest of
+                                    # this frame's 20 ms.
+                                    await asyncio.sleep(delay)
+                                else:
+                                    # Negative delay = we couldn't ship this frame
+                                    # within its 20 ms slot; the event loop is
+                                    # behind real time. Track how far behind.
+                                    max_lag = max(max_lag, -delay)
+                                    if delay < -0.5:
+                                        # Fell badly behind (a real stall). Resync
+                                        # so we don't then fire a long unpaced
+                                        # burst of frames.
+                                        next_frame_at = loop.time()
+                        # One conclusive line per reply: if we never fell behind,
+                        # pacing is healthy and any choppiness is elsewhere. If lag
+                        # is large, the event loop is starved (likely free-tier CPU).
+                        if max_lag > 0.05:
+                            print(f">>> audio fell behind real time by "
+                                  f"{int(max_lag * 1000)}ms (likely CPU starvation)")
                         # Flush any trailing bytes (< one full frame) so the tail
                         # of the speech isn't clipped.
                         if buf and not interrupt.is_set():
