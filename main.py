@@ -26,9 +26,15 @@ def system_prompt():
         f"Keep replies short and natural. When a caller wants to book, collect their name, "
         f"preferred date, time, and email address. Callers often say emails out loud, like "
         f"'george dot smith at gmail dot com' — convert that into standard format "
-        f"('george.smith@gmail.com'). Read the email back to confirm you heard it right before booking. "
-        f"Then call the book_appointment tool with the date in YYYY-MM-DD format. "
-        f"Confirm the booking back in one sentence."
+        f"('george.smith@gmail.com'). "
+        f"Email accuracy is critical, so always confirm it before booking: read the full email "
+        f"back clearly, letter group by letter group, and ask 'Is that correct?'. "
+        f"If the caller says any part is wrong, ask them to spell just that part one letter at a "
+        f"time. They may use the phonetic alphabet — 'B as in Bravo' means the letter B, so take "
+        f"only the letter. Rebuild the full email, read it back again, and keep repeating this "
+        f"confirm-and-correct loop until the caller explicitly agrees it is right. "
+        f"Only after the caller confirms the email, call the book_appointment tool with the date "
+        f"in YYYY-MM-DD format. Confirm the booking back in one sentence."
     )
 
 
@@ -51,11 +57,29 @@ TOOLS = [{
 }]
 
 
+def strip_phonetics(text):
+    """Collapse phonetic-alphabet spellings down to their single letter.
+    'b as in bravo' -> 'b', 'm for mike' -> 'm'. When a caller corrects a
+    misheard letter they often spell it this way, so we keep just the
+    letter and drop the example word.
+
+    The regex pieces:
+      \\b([a-z])      a single standalone letter, captured as group 1
+      \\s+            one or more spaces
+      (?:as in|...)   the connector phrase ('as in', 'as', 'for', 'like')
+      \\s+[a-z]+      the example word we want to throw away
+    The replacement r'\\1' puts back only the captured letter."""
+    return re.sub(r"\b([a-z])\s+(?:as in|as|for|like)\s+[a-z]+\b", r"\1", text)
+
+
 def normalize_email(raw):
     """Turn a spoken email like 'george dot smith at gmail dot com'
     into 'george.smith@gmail.com'. Safe to run on an already-clean
     email too — it just lowercases and returns it unchanged."""
     email = raw.strip().lower()
+    # Resolve any 'B as in Bravo' spellings to plain letters first, so the
+    # example words don't survive into the address.
+    email = strip_phonetics(email)
     # Replace spoken words with their symbols. \b is a "word boundary",
     # so \bat\b matches the standalone word "at" but NOT the "at" inside
     # "nathan". The \s* around it eats any spaces on either side.
